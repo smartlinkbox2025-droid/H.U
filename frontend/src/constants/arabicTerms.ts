@@ -128,7 +128,7 @@ export const AR = {
     },
     addNew: 'إبرام عقد جديد',
     editTitle: 'تعديل العقد',
-    generatedInvoices: 'الفواتير المُولدة',
+    generatedInvoices: 'الفواتير المولّدة',
   },
   payment: {
     contract: 'العقد',

@@ -115,7 +115,7 @@ export async function ensureArabicFonts(): Promise<void> {
 // when pdfmake lays out characters left-to-right.
 
 const LTR_RUN_RE =
-  /([\d\u0660-\u0669\u06F0-\u06F9][\d\u0660-\u0669\u06F0-\u06F9.,\u066B\u066C/\-:]*|[A-Za-z][A-Za-z0-9._\-]*)/g;
+  /([\d\u0660-\u0669\u06F0-\u06F9][\d\u0660-\u0669\u06F0-\u06F9.,\u066B\u066C()\[\]{}%#&@=_/\-:]*|[A-Za-z][A-Za-z0-9._()\[\]{}%#&@=/\-:]*|\([\d\u0660-\u0669\u06F0-\u06F9A-Za-z][\d\u0660-\u0669\u06F0-\u06F9A-Za-z.,\u066B\u066C()\[\]{}%#&@=/\-:]*\))/g;
 
 const ARABIC_INDIC_DIGITS = /[\u0660-\u0669\u06F0-\u06F9\u066B\u066C]/g;
 const AR_TO_LATIN: Record<string, string> = {
