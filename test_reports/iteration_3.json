@@ -1,0 +1,46 @@
+{
+  "summary": "Verified visual correctness of Arabic PDF exports (Financial, Vacancy, Properties). Fix from previous iteration produces valid PDF files but has TWO CRITICAL bugs still present: (1) Arabic-Indic digits (٠-٩) are drawn REVERSED in the rendered PDF — e.g. ١٬٥٨٥٬٠٠٠ renders on paper as ٠٠٠٬٥٨٥٬١ (LTR reads 000,585,1) even though the ar() helper output preserves the correct order. Latin digits (0-9) are unaffected. (2) Many Arabic letters render as BOXES / are missing — notably isolated ALEF (ﺍ U+FE8D), Arabic thousands separator (٬ U+066C), and some isolated RA/SEEN forms — because the Tajawal subset embedded by pdfmake does not include all Arabic Presentation Forms produced by arabic-persian-reshaper. Contract PDF could not be tested (no contracts in this fresh preview env; the profile is not shared with previous iteration).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "pdfGenerator.ts / all PDF exports",
+        "issue": "Arabic-Indic numeric runs (٠-٩) are visually REVERSED in the generated PDF. pdfplumber char-extraction of properties.pdf row 4 (property price 1,200,000) yields LTR order 'ﺱ . ﺭ ٠ ٠ ٠ ? ٠ ٠ ٢ ? ١' — the '١' is at the RIGHTMOST position, whereas ar('١٬٢٠٠٬٠٠٠ ر.س') returns 'ﺱ.ﺭ ١٬٢٠٠٬٠٠٠' (i.e. '١' immediately after the space). Same issue reproduced for vacancy total value ١٬٥٨٥٬٠٠٠ → drawn as ٠٠٠٬٥٨٥٬١, and for every price cell (٤٥٬٠٠٠ → ٠٠٠٬٥٤, etc). Latin digits e.g. '2026', '01', '31' preserved correctly. Root cause hypothesis: pdfmake internally applies UBA / RTL text reordering when it detects Arabic Presentation Forms in a string, and this second reversal fights against the manual reversal done by bidiForPdf().",
+        "selector": "[data-testid='export-pdf-button'], [data-testid='report-pdf-button'], [data-testid='vacancy-pdf-button']",
+        "priority": "HIGH"
+      },
+      {
+        "component": "pdfGenerator.ts — Arabic letter shaping",
+        "issue": "Many Arabic letters render as SQUARES/BOXES or are completely absent. Rendered images show broken words: 'التقرير' shows as 'ﻟﺘﻘﺮﻳﺮ' (initial ALEF missing → box), 'الرياض' as 'ﻟﺮﻳﺎ' (final ﺽ missing), 'للعقارات' as 'ﻟﻠﻌﻘﺎ' (last three glyphs ﺭﺍﺕ missing), 'الحالة' misrendered as 'ﻟﺤﻟﺎﺔ' (LAM-ALEF ligature at wrong position). Also the Arabic thousands separator ٬ (U+066C) renders as a small dot / box. Root cause: Tajawal subset embedded by pdfmake does not contain glyphs for several presentation forms produced by arabic-persian-reshaper (specifically U+FE8D ALEF ISOLATED, U+FEAD RA ISOLATED, U+FEB1 SEEN ISOLATED, U+066C, U+FEFB LAM-ALEF ISOLATED). ToUnicode CMap in properties.pdf shows only ~30 mapped CIDs — most Arabic Presentation Forms are absent.",
+        "selector": "n/a (all PDF exports)",
+        "priority": "HIGH"
+      },
+      {
+        "component": "FooterPageNumbers / all PDFs",
+        "issue": "Footer 'صفحة X من Y' renders with 'صفحة' shaped correctly but the surrounding layout is fine. This particular case works because digits are single-digit and no Arabic-Indic separator is involved. NOT a regression — flagging for completeness."
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/tmp/pdf_test/properties.pdf", "/tmp/pdf_test/financial.pdf", "/tmp/pdf_test/vacancy.pdf", "/tmp/pdf_test/properties_table.png"],
+  "action_items": [
+    "URGENT: Fix Arabic-Indic digit reversal. Options: (a) Convert all fmtMoney/fmtDate output to Latin digits (0-9) so pdfmake's internal bidi doesn't touch them — Latin digits are verified to render correctly LTR. (b) Explicitly set { direction: 'ltr' } on every text node so pdfmake skips bidi. (c) Reverse Arabic-Indic digit runs in ar() to counter-act pdfmake's reversal (but this may break if pdfmake changes behaviour).",
+    "URGENT: Investigate why the Tajawal subset embedded by pdfmake is missing multiple Arabic Presentation Form glyphs. Possible fixes: (a) Use a font with GUARANTEED coverage of U+FE70–U+FEFC (e.g. Amiri, Noto Naskh Arabic — verify glyph presence for the specific presentation-form codepoints emitted by arabic-persian-reshaper). (b) Instead of reshaping to presentation forms, use pdfmake's built-in bidi + rely on font's GSUB shaping (may not work in pdfmake since it doesn't call HarfBuzz). (c) Switch PDF library — jsPDF+opentype.js or pdfjs-lib both do proper shaping.",
+    "The current bidi/reshape approach is incompatible with pdfmake for numeric content. Recommend re-architecting: either use only Latin digits everywhere in reports, OR switch to a PDF library that natively shapes Arabic (e.g. pdfkit + fontkit which does OpenType shaping).",
+    "Optional (unrelated): pre-create at least one demo Contract in the auto-seed so PDF-contract flow can be smoke-tested; currently a fresh env has zero contracts and print-contract-<id> cannot be exercised without manual data-entry."
+  ],
+  "critical_code_review_comments": [
+    "pdfGenerator.ts::bidiForPdf() — the algorithm assumes pdfmake draws every character strictly LTR with no additional processing. In pdfmake 0.3.11 this assumption is FALSE when Arabic Presentation Forms are present in the string: pdfmake DOES apply RTL reordering (likely via its embedded unicode-bidi behaviour or through Adobe font-mapping). The current ar() therefore double-reverses digits and leaves Arabic letters in the wrong position/order.",
+    "pdfGenerator.ts — mixing manual bidi with pdfmake's implicit bidi will always produce subtle bugs. Suggest exhaustive verification with side-by-side rendering rather than string-level testing (page.evaluate on ar() shows correct-looking strings, but the RENDERED PDF is different).",
+    "Font strategy — Tajawal is a modern OpenType font whose Arabic text depends on OT shaping (GSUB/GPOS). Using arabic-persian-reshaper to pre-shape and hoping the font's cmap covers U+FE70–U+FEFC is brittle; many modern Arabic fonts only have complete OT tables and only partial cmap for presentation forms. Fonts to try that DO ship complete presentation-form cmap: 'Amiri Regular', 'Noto Naskh Arabic', 'Scheherazade New'."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "N/A", "frontend": "20% — PDFs download but Arabic content is visibly broken; the reported bug is NOT fixed" },
+  "test_credentials": "N/A – client-side only",
+  "seed_data_creation": "Reused auto-seed 4 properties (النخيل شقة, الشاطئ فيلا, تجاري محل الوادي, برج الياسمين). No contracts existed; contract PDF (Test 4) could NOT be exercised — main agent should either seed a demo contract or verify manually.",
+  "retest_needed": true,
+  "main_agent_can_self_test": false,
+  "context_for_next_testing_agent": "PDFs saved in /tmp/pdf_test (properties.pdf, financial.pdf, vacancy.pdf). Render with `pdftoppm -r 200 <file> out -png` to see the actual glyphs. Use `pdfplumber` chars API to inspect visual x-position of each drawn glyph (see script in this iteration). ar() helper output alone is CORRECT (per page.evaluate); the failure is downstream in pdfmake's own text-drawing pipeline. Do NOT trust page.evaluate output of ar() as proof that the PDF is correct — always render the PDF and visually inspect.",
+  "rca of the issue": "TWO independent defects: (A) Arabic-Indic digit reversal: bidiForPdf() reverses the whole string in a bidi-aware way, then pdfmake reverses AGAIN when it lays out Arabic Presentation Forms; net effect for Arabic-Indic digit runs is a single reversal → digits appear backwards. Latin digits [0-9] escape because they don't trigger pdfmake's Arabic handling. (B) Missing glyphs: Tajawal font subset in the PDF has ToUnicode entries for only ~30 presentation-form CIDs; the remainder either aren't in the font's cmap at all or weren't included in pdfmake's subset. Visible boxes/missing letters in EVERY rendered PDF confirm this. Both defects must be fixed before the original user complaint ('الأحرف والأرقام في التقارير PDF غير صحيحة') can be considered resolved. The current fix has moved the letters closer to shaped presentation forms but the fundamental rendering pipeline (arabic-persian-reshaper + manual bidi + pdfmake + Tajawal cmap subset) is not sufficient. Recommend switching to Latin digits and/or a different PDF/font stack (e.g. pdfkit+fontkit with Amiri)."
+}

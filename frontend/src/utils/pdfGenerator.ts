@@ -4,6 +4,8 @@
 // producing production-grade Arabic PDF output. Once cached, the font is available offline.
 
 import pdfMake from 'pdfmake/build/pdfmake';
+// @ts-ignore - CJS module without types
+import { ArabicShaper } from 'arabic-persian-reshaper';
 import { AR } from '../constants/arabicTerms';
 
 const FONT_URL = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/tajawal/Tajawal-Regular.ttf';
@@ -88,6 +90,48 @@ export interface PdfSection {
   };
 }
 
+// -----------------------------------------------------------------------------
+// Arabic bidi + shaping for pdfmake
+// -----------------------------------------------------------------------------
+// pdfmake renders characters strictly left-to-right and does not perform Arabic
+// letter shaping (contextual forms) nor bidirectional reordering. To make Arabic
+// text render correctly we:
+//   1. Reshape logical Arabic characters into their contextual presentation
+//      forms via arabic-persian-reshaper.
+//   2. Reorder the shaped glyphs for LTR-drawing: reverse the string in a
+//      bidi-aware manner so that runs of digits/Latin remain in original order
+//      (numbers must not be reversed).
+// -----------------------------------------------------------------------------
+
+// LTR run: Latin-Indic digits, Arabic-Indic digits (٠-٩ / ۰-۹), Latin letters,
+// and common numeric separators (,.٬٫/-:).  Whitespace is treated as neutral
+// and joins the surrounding Arabic segment so word gaps read naturally.
+const LTR_RUN_RE =
+  /([\d\u0660-\u0669\u06F0-\u06F9][\d\u0660-\u0669\u06F0-\u06F9.,\u066B\u066C/\-:]*|[A-Za-z][A-Za-z0-9._\-]*)/g;
+
+function bidiForPdf(text: string): string {
+  if (!text) return text;
+  const shaped: string = ArabicShaper.convertArabic(String(text));
+  const parts: { ltr: boolean; text: string }[] = [];
+  let lastIndex = 0;
+  let m: RegExpExecArray | null;
+  LTR_RUN_RE.lastIndex = 0;
+  while ((m = LTR_RUN_RE.exec(shaped)) !== null) {
+    if (m.index > lastIndex) parts.push({ ltr: false, text: shaped.slice(lastIndex, m.index) });
+    parts.push({ ltr: true, text: m[0] });
+    lastIndex = m.index + m[0].length;
+  }
+  if (lastIndex < shaped.length) parts.push({ ltr: false, text: shaped.slice(lastIndex) });
+  return parts
+    .reverse()
+    .map((p) => (p.ltr ? p.text : p.text.split('').reverse().join('')))
+    .join('');
+}
+
+/** Shape a single string for direct pdfmake output. */
+export const ar = (s: string | number | undefined | null): string =>
+  s === undefined || s === null ? '' : bidiForPdf(String(s));
+
 export async function generateArabicPDF(opts: {
   title: string;
   subtitle?: string;
@@ -99,18 +143,18 @@ export async function generateArabicPDF(opts: {
 
   const content: any[] = [
     {
-      text: opts.companyName || AR.app.title,
+      text: ar(opts.companyName || AR.app.title),
       style: 'company',
       alignment: 'right',
     },
     {
-      text: opts.title,
+      text: ar(opts.title),
       style: 'title',
       alignment: 'right',
       margin: [0, 6, 0, 4],
     },
     ...(opts.subtitle
-      ? [{ text: opts.subtitle, style: 'subtitle', alignment: 'right', margin: [0, 0, 0, 12] }]
+      ? [{ text: ar(opts.subtitle), style: 'subtitle', alignment: 'right', margin: [0, 0, 0, 12] }]
       : []),
     {
       canvas: [{ type: 'line', x1: 0, y1: 0, x2: 515, y2: 0, lineWidth: 0.8, lineColor: '#0284C7' }],
@@ -120,11 +164,11 @@ export async function generateArabicPDF(opts: {
 
   for (const s of opts.sections) {
     if (s.heading) {
-      content.push({ text: s.heading, style: 'sectionHeading', alignment: 'right', margin: [0, 10, 0, 6] });
+      content.push({ text: ar(s.heading), style: 'sectionHeading', alignment: 'right', margin: [0, 10, 0, 6] });
     }
     if (s.paragraphs) {
       for (const p of s.paragraphs) {
-        content.push({ text: p, alignment: 'right', margin: [0, 0, 0, 4] });
+        content.push({ text: ar(p), alignment: 'right', margin: [0, 0, 0, 4] });
       }
     }
     if (s.table) {
@@ -136,9 +180,9 @@ export async function generateArabicPDF(opts: {
           headerRows: 1,
           widths: s.table.widths ? [...s.table.widths].reverse() : headers.map(() => '*'),
           body: [
-            headers.map((h) => ({ text: h, style: 'tableHeader', alignment: 'right' })),
+            headers.map((h) => ({ text: ar(h), style: 'tableHeader', alignment: 'right' })),
             ...rows.map((row) =>
-              row.map((c) => ({ text: String(c ?? ''), alignment: 'right' }))
+              row.map((c) => ({ text: ar(c), alignment: 'right' }))
             ),
           ],
         },
@@ -165,7 +209,7 @@ export async function generateArabicPDF(opts: {
       tableHeader: { bold: true, color: '#FFFFFF', fillColor: '#0F172A' },
     },
     footer: (currentPage: number, pageCount: number) => ({
-      text: `صفحة ${currentPage} من ${pageCount}`,
+      text: ar(`صفحة ${currentPage} من ${pageCount}`),
       alignment: 'center',
       fontSize: 8,
       margin: [0, 10, 0, 0],
