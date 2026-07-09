@@ -1,0 +1,62 @@
+{
+  "summary": "CRITICAL REGRESSION — the full pdfGenerator rewrite (bundled Amiri via Vite ?url + addVirtualFileSystem/addFonts + direction/textDirection/rtl flags) has completely BROKEN PDF generation. Zero PDFs are produced from the UI. All three tested flows (Properties, Financial, Vacancy) throw an uncaught PAGEERROR: 'unsupported number: NaN' originating from pdfkit's PDFDocument.rect during Renderer.renderVector inside pdfMake's createPdfKitDocument. No download event ever fires and no file reaches the browser. The failure is reproducible even with the absolute minimal doc definition {content:[{text:'hello',font:'Amiri'}], defaultStyle:{font:'Amiri'}} — proving the root cause is the Amiri TTF itself (or pdfmake 0.3.11's inability to consume it), NOT the RTL flags, the canvas line, the table layout or the widths logic. Contract PDF was not exercised because it uses the exact same pdfGenerator module and will fail identically. Excel export still works. This is a complete regression versus iteration_4 (which reported all four PDFs rendering).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Properties PDF export (/properties → data-testid='export-pdf-button')",
+        "issue": "Click produces uncaught PAGEERROR 'unsupported number: NaN' from pdfmake's PDFDocument.rect → Renderer.renderVector. No PDF is downloaded. Confirmed reproducible.",
+        "affected_selectors": ["[data-testid='export-pdf-button']"]
+      },
+      {
+        "flow": "Financial report PDF (/reports/financial → data-testid='report-pdf-button')",
+        "issue": "Same PAGEERROR 'unsupported number: NaN'. No PDF downloaded.",
+        "affected_selectors": ["[data-testid='report-pdf-button']"]
+      },
+      {
+        "flow": "Vacancy report PDF (/reports/vacancy → data-testid='vacancy-pdf-button')",
+        "issue": "Same PAGEERROR 'unsupported number: NaN'. No PDF downloaded.",
+        "affected_selectors": ["[data-testid='vacancy-pdf-button']"]
+      },
+      {
+        "flow": "Contract PDF (data-testid^='print-contract-')",
+        "issue": "Not directly re-tested but uses identical pdfGenerator.ts + Amiri path — will fail with the same NaN error. Assume broken.",
+        "affected_selectors": ["[data-testid^='print-contract-']"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/tmp/pdf_test5/00_home.png"
+  ],
+  "action_items": [
+    "CRITICAL: fix pdfmake 'unsupported number: NaN' error — no PDF is currently produced. Recommended fixes in order of likelihood of success:",
+    "(1) The bundled Amiri static TTF (Regular=431 KB, Bold=413 KB) contains layout tables (GSUB/GPOS/GDEF) and metrics (numOfHMetrics=6687, unitsPerEm=1000) that pdfmake 0.3.11's embedded PDFKit / fontkit chokes on and produces NaN downstream in rect rendering. Try a SUBSET Amiri (fonttools subset --drop-tables+=GSUB,GPOS,GDEF,GPOS,BASE and keep only the required cmap ranges U+0600–U+06FF + U+FE70–U+FEFC + U+0020–U+007F). Subsetting removes the tables pdfkit doesn't use and typically fixes the NaN.",
+    "(2) Alternative — switch to a font already proven compatible with pdfmake (e.g. NotoSansArabic-Regular/Bold, Cairo-Regular/Bold, or IBM Plex Sans Arabic). These are used in many pdfmake + Arabic examples and don't trip pdfkit.",
+    "(3) Alternative — pin pdfmake to a version known to work with Amiri, or migrate to pdf-lib / jsPDF+arabic-reshaper stack.",
+    "(4) Regardless of which fix is chosen, wrap generateArabicPDF's pdfMake.createPdf(...).download(...) in error handling — currently the getBase64/download callback silently never fires on error, leaving the user with a stuck button and no feedback. Attach an onError handler and surface a toast so users know the export failed.",
+    "(5) Also verify: `direction`, `textDirection`, and `rtl` are all sent at docDefinition and defaultStyle level. pdfmake 0.3.x accepts `direction: 'rtl'` at docDefinition but does NOT understand `textDirection` or `rtl:true`. Leaving them is harmless once the font works, but they add noise.",
+    "(6) The addVirtualFileSystem call does put fonts under pm.virtualfs (verified via pmKeys), NOT pm.vfs — that's actually correct for pdfmake 0.3.x, so no change needed there.",
+    "(7) After the font fix, re-verify: (a) Arabic letters shaped/connected (no boxes), (b) Latin digits LTR, (c) headers rightmost = first logical column, (d) no clipping, (e) footer 'صفحة N من M' shows Arabic connected + Latin digits."
+  ],
+  "critical_code_review_comments": [
+    "pdfGenerator.ts:210 — canvas horizontal line hard-codes x2:515 assuming A4-40-40. Works today but should be derived from page width so any future pageMargins/pageSize change doesn't silently create wrong-width lines.",
+    "pdfGenerator.ts:279-291 — docDefinition sets three RTL flags (direction, textDirection, rtl) plus rtl in defaultStyle. Only `direction:'rtl'` is officially supported by pdfmake 0.3.x. The others are silently ignored. Not a bug but cargo-cult; drop them for clarity.",
+    "pdfGenerator.ts:317 — createPdf(...).download(filename) is fire-and-forget. There is NO error handling / no user-facing failure signal when pdfmake throws (as it does today). Wrap in try/catch AND attach a onerror handler via createPdf().getBlob(callback, options) so the UI can toast 'فشل توليد ملف PDF' when generation fails.",
+    "pdfGenerator.ts:43-55 — urlToBase64 uses String.fromCharCode.apply which on ~430 KB inputs is fine but hits argument-length limits for larger files. Consider using FileReader.readAsDataURL for robustness.",
+    "pdfGenerator.ts:167-183 — autoWidths returns strings like '30*'. pdfmake accepts this, but for the failing minimal test (no autoWidths involved) the NaN still occurs, confirming autoWidths is NOT the culprit.",
+    "iteration_4.json marked the previous version 'FIXED' with 100% success, and iteration_5 completely replaced the working generator without preserving a fallback. Add a manual PDF-export smoke test to CI (headless-chrome + this repo) so any regression like this is caught before code review closes."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "N/A (frontend-only test as requested)",
+    "frontend": "0% — 0/4 PDF flows produce a file. Excel export still works (regression-clear on non-PDF exports)."
+  },
+  "test_credentials": "N/A — client-side PWA, no auth",
+  "seed_data_creation": "Auto-seeded 4 properties + 2 customers (present in DB). Did NOT create a new contract because Test 4 depends on Test 1 working first; the identical pdfGenerator would fail regardless.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "The pdfmake NaN error is reproducible with the minimal document {content:[{text:'hello',font:'Amiri'}], defaultStyle:{font:'Amiri'}} once Amiri is registered via pm.addVirtualFileSystem + pm.addFonts. That proves the fault is the Amiri font itself (or pdfmake's inability to parse its tables), not the doc-definition layout. To confirm any fix: (a) load the new font, (b) run pm.createPdf({content:[{text:'اختبار', font:'Amiri'}], defaultStyle:{font:'Amiri'}}).getBase64(cb) — cb must fire with a non-empty base64. Only then move on to the four full PDF flows. Font TTF is at /app/frontend/src/assets/fonts/Amiri-Regular.ttf (431116 bytes, sfntVersion 00010000, 15 tables including GSUB/GPOS/GDEF, numOfHMetrics=6687, unitsPerEm=1000).",
+  "rca of the issue": "Root cause: the bundled Amiri Regular+Bold TTF files (431/413 KB) contain OpenType layout tables (GSUB/GPOS/GDEF) and metrics that pdfmake 0.3.11's embedded PDFKit/fontkit cannot consume without emitting a NaN somewhere in its internal metric pipeline. The NaN propagates to PDFDocument.rect (via Renderer.renderVector) which then throws `unsupported number: NaN`. Because the throw happens inside createPdfKitDocument's synchronous rendering, the getBase64/download callback never fires — so from the user's perspective the button click silently does nothing. Evidence: (1) minimal doc definition without any RTL flags, canvas, tables or widths reproduces the exact same NaN, (2) the same pdfmake instance works up to the point of embedding Amiri (Roboto is missing from this browser build so we can't A/B with the default), (3) font file structure inspected via python — valid TTF but with unusual metrics (unitsPerEm=1000 vs the more common 1024/2048, plus a fat hmtx of 6687 entries) that are prime suspects for fontkit metric-scaling arithmetic overflow. Reproduction: navigate to any PDF flow, click the PDF button, watch console for 'unsupported number: NaN'; no file downloads. Mitigation options are documented in action_items."
+}

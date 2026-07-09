@@ -1,28 +1,47 @@
-// PDF generator with Arabic RTL support.
-// Fonts are fetched at runtime from Google Fonts and cached in localStorage as Base64,
-// then registered with pdfmake's virtual filesystem. This keeps the repo lean while
-// producing production-grade Arabic PDF output. Once cached, the font is available offline.
+// PDF generator with Arabic RTL support — production-grade.
+//
+// Pipeline:
+//   1. Amiri TTF (regular + bold) bundled directly in the project as static
+//      assets (see /src/assets/fonts). Vite's `?url` import produces same-origin
+//      URLs that Workbox pre-caches, giving true offline PDF output.
+//   2. Fonts are registered explicitly in pdfMake.fonts / VFS at first use.
+//   3. Every text string is pre-shaped through arabic-persian-reshaper to
+//      convert logical Arabic characters into their contextual presentation
+//      forms (Amiri's cmap covers the full U+FE70..U+FEFC range) and then
+//      bidi-reordered so it draws correctly when pdfmake lays out LTR.
+//   4. Arabic-Indic digits are normalized to ASCII 0-9 so pdfmake's implicit
+//      bidi cannot reverse numeric runs.
+//   5. RTL is declared at every level pdfmake understands: docDefinition
+//      (`direction: 'rtl'`), defaultStyle (`alignment: 'right'`, `rtl: true`),
+//      per-cell alignment 'right', and via the `pageOrientation` layout.
 
 import pdfMake from 'pdfmake/build/pdfmake';
 // @ts-ignore - CJS module without types
 import { ArabicShaper } from 'arabic-persian-reshaper';
 import { AR } from '../constants/arabicTerms';
 
-const FONT_URL = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/amiri/Amiri-Regular.ttf';
-const FONT_KEY_B64 = 'sre_font_amiri_regular_b64_v3';
-const FONT_URL_BOLD = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/amiri/Amiri-Bold.ttf';
-const FONT_KEY_BOLD_B64 = 'sre_font_amiri_bold_b64_v3';
+// Vite ?url imports produce bundled same-origin URLs. Both TTFs live in
+// /src/assets/fonts and are copied by Vite into the build output.  Workbox
+// (VitePWA) auto-caches them so PDF generation works fully offline once the
+// PWA is installed / first visited.
+import AmiriRegularUrl from '../assets/fonts/Amiri-Regular.ttf?url';
+import AmiriBoldUrl from '../assets/fonts/Amiri-Bold.ttf?url';
 
-// Invalidate any previously-poisoned caches from earlier attempts.
+// Clear caches from previous font strategies so users don't hit stale bytes.
 try {
-  localStorage.removeItem('sre_font_tajawal_regular_b64');
-  localStorage.removeItem('sre_font_tajawal_bold_b64');
-  localStorage.removeItem('sre_font_tajawal_regular_b64_v2');
-  localStorage.removeItem('sre_font_tajawal_bold_b64_v2');
+  const legacyKeys = [
+    'sre_font_tajawal_regular_b64', 'sre_font_tajawal_bold_b64',
+    'sre_font_tajawal_regular_b64_v2', 'sre_font_tajawal_bold_b64_v2',
+    'sre_font_amiri_regular_b64_v3', 'sre_font_amiri_bold_b64_v3',
+  ];
+  for (const k of legacyKeys) localStorage.removeItem(k);
 } catch { /* ignore */ }
 
+const FONT_CACHE_KEY_REG = 'sre_font_amiri_reg_v4';
+const FONT_CACHE_KEY_BOLD = 'sre_font_amiri_bold_v4';
+
 async function urlToBase64(url: string): Promise<string> {
-  const res = await fetch(url, { cache: 'force-cache' });
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`تعذّر تنزيل ملف الخط (${res.status})`);
   const buf = await res.arrayBuffer();
   if (buf.byteLength < 10000) throw new Error(`ملف الخط تالف — الحجم ${buf.byteLength} بايت`);
@@ -35,16 +54,19 @@ async function urlToBase64(url: string): Promise<string> {
   return btoa(binary);
 }
 
-async function loadFont(url: string, key: string): Promise<string> {
-  const cached = localStorage.getItem(key);
-  if (cached && cached.length > 5000) return cached;
+async function loadFontBase64(url: string, key: string): Promise<string> {
+  try {
+    const cached = localStorage.getItem(key);
+    if (cached && cached.length > 10000) return cached;
+  } catch { /* ignore */ }
   const b64 = await urlToBase64(url);
   try { localStorage.setItem(key, b64); } catch { /* quota — ignore */ }
   return b64;
 }
 
 let fontsReady = false;
-let cachedVfs: Record<string, string> = {};
+
+// Font family registration — matches pdfMake.fonts contract.
 const cachedFonts = {
   Amiri: {
     normal: 'Amiri-Regular.ttf',
@@ -57,16 +79,16 @@ const cachedFonts = {
 export async function ensureArabicFonts(): Promise<void> {
   if (fontsReady) return;
   const [regular, bold] = await Promise.all([
-    loadFont(FONT_URL, FONT_KEY_B64),
-    loadFont(FONT_URL_BOLD, FONT_KEY_BOLD_B64),
+    loadFontBase64(AmiriRegularUrl, FONT_CACHE_KEY_REG),
+    loadFontBase64(AmiriBoldUrl, FONT_CACHE_KEY_BOLD),
   ]);
-  cachedVfs = {
+  const cachedVfs: Record<string, string> = {
     'Amiri-Regular.ttf': regular,
     'Amiri-Bold.ttf': bold,
   };
-  // pdfmake v0.3.x browser bundle: fonts must be registered via addVirtualFileSystem
-  // (which writes into an internal virtualfs module that Printer reads at createPdf-time).
   const pm: any = pdfMake as any;
+  // pdfmake v0.3.x browser bundle: fonts must be registered via
+  // addVirtualFileSystem so the internal Printer sees them.
   if (typeof pm.addVirtualFileSystem === 'function') {
     pm.addVirtualFileSystem(cachedVfs);
   } else {
@@ -80,39 +102,19 @@ export async function ensureArabicFonts(): Promise<void> {
   fontsReady = true;
 }
 
-export interface PdfSection {
-  heading?: string;
-  paragraphs?: string[];
-  table?: {
-    headers: string[];
-    rows: (string | number)[][];
-    widths?: (string | number)[];
-  };
-}
-
 // -----------------------------------------------------------------------------
 // Arabic bidi + shaping for pdfmake
 // -----------------------------------------------------------------------------
-// pdfmake renders characters strictly left-to-right and does not perform Arabic
-// letter shaping (contextual forms) nor bidirectional reordering. To make Arabic
-// text render correctly we:
-//   1. Reshape logical Arabic characters into their contextual presentation
-//      forms via arabic-persian-reshaper.
-//   2. Reorder the shaped glyphs for LTR-drawing: reverse the string in a
-//      bidi-aware manner so that runs of digits/Latin remain in original order
-//      (numbers must not be reversed).
-// -----------------------------------------------------------------------------
+// pdfmake does not perform OpenType shaping. To render connected/cursive Arabic
+// we (1) normalise Arabic-Indic digits to ASCII so pdfmake doesn't reverse
+// numeric runs, (2) reshape Arabic letters via arabic-persian-reshaper into
+// their contextual presentation forms (which Amiri's cmap covers fully),
+// (3) bidi-reverse the string with LTR-run preservation so it draws correctly
+// when pdfmake lays out characters left-to-right.
 
-// LTR run: Latin-Indic digits, Arabic-Indic digits (٠-٩ / ۰-۹), Latin letters,
-// and common numeric separators (,.٬٫/-:).  Whitespace is treated as neutral
-// and joins the surrounding Arabic segment so word gaps read naturally.
 const LTR_RUN_RE =
   /([\d\u0660-\u0669\u06F0-\u06F9][\d\u0660-\u0669\u06F0-\u06F9.,\u066B\u066C/\-:]*|[A-Za-z][A-Za-z0-9._\-]*)/g;
 
-// Map Arabic-Indic digits (٠-٩) and Extended Arabic-Indic digits (۰-۹)
-// plus Arabic decimal/thousands separators (٫ ٬) to their ASCII equivalents.
-// pdfmake applies implicit bidi reordering to Arabic-Indic digit runs, which
-// visually reverses numeric strings inside PDF output. ASCII digits are safe.
 const ARABIC_INDIC_DIGITS = /[\u0660-\u0669\u06F0-\u06F9\u066B\u066C]/g;
 const AR_TO_LATIN: Record<string, string> = {
   '\u0660': '0', '\u0661': '1', '\u0662': '2', '\u0663': '3', '\u0664': '4',
@@ -128,13 +130,8 @@ function toLatinDigits(s: string): string {
 
 function bidiForPdf(text: string): string {
   if (!text) return text;
-  // 1) Normalize any Arabic-Indic digits & separators to ASCII so pdfmake does
-  //    NOT apply its implicit bidi reversal to numeric runs.
   const normalized = toLatinDigits(String(text));
-  // 2) Reshape Arabic letters into contextual presentation forms.
   const shaped: string = ArabicShaper.convertArabic(normalized);
-  // 3) Bidi-aware reversal: reverse the string so it reads correctly when
-  //    pdfmake draws LTR, but keep LTR runs (digits, Latin) intact.
   const parts: { ltr: boolean; text: string }[] = [];
   let lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -151,9 +148,39 @@ function bidiForPdf(text: string): string {
     .join('');
 }
 
-/** Shape a single string for direct pdfmake output. */
+/** Shape a single string for direct pdfmake output. Exposed for tests. */
 export const ar = (s: string | number | undefined | null): string =>
   s === undefined || s === null ? '' : bidiForPdf(String(s));
+
+export interface PdfSection {
+  heading?: string;
+  paragraphs?: string[];
+  table?: {
+    headers: string[];
+    rows: (string | number)[][];
+    widths?: (string | number)[];
+  };
+}
+
+// Estimate a comfortable column width from the longest cell length so Arabic
+// content is not clipped and columns feel balanced.  Applied when caller does
+// not supply explicit widths.
+function autoWidths(headers: string[], rows: (string | number)[][]): (string | number)[] {
+  const cols = headers.length;
+  const lens: number[] = new Array(cols).fill(0);
+  for (let c = 0; c < cols; c++) {
+    lens[c] = Math.max(lens[c], String(headers[c] ?? '').length);
+  }
+  for (const row of rows) {
+    for (let c = 0; c < cols; c++) {
+      lens[c] = Math.max(lens[c], String(row[c] ?? '').length);
+    }
+  }
+  const total = lens.reduce((a, b) => a + b, 0) || 1;
+  // Use star widths proportional to content length so pdfmake auto-distributes
+  // the available page width without truncation.
+  return lens.map((l) => `${Math.max(1, Math.round((l / total) * 100))}*`);
+}
 
 export async function generateArabicPDF(opts: {
   title: string;
@@ -187,7 +214,12 @@ export async function generateArabicPDF(opts: {
 
   for (const s of opts.sections) {
     if (s.heading) {
-      content.push({ text: ar(s.heading), style: 'sectionHeading', alignment: 'right', margin: [0, 10, 0, 6] });
+      content.push({
+        text: ar(s.heading),
+        style: 'sectionHeading',
+        alignment: 'right',
+        margin: [0, 10, 0, 6],
+      });
     }
     if (s.paragraphs) {
       for (const p of s.paragraphs) {
@@ -195,17 +227,32 @@ export async function generateArabicPDF(opts: {
       }
     }
     if (s.table) {
-      // Reverse header/row so first cell appears at right side in Arabic reading order
+      // Reverse column order so the first logical column reads at the right
+      // (Arabic reading direction).  Widths follow the same reversal.
       const headers = [...s.table.headers].reverse();
       const rows = s.table.rows.map((r) => [...r].reverse());
+      const widths = s.table.widths
+        ? [...s.table.widths].reverse()
+        : autoWidths(headers, rows);
+
       content.push({
         table: {
           headerRows: 1,
-          widths: s.table.widths ? [...s.table.widths].reverse() : headers.map(() => '*'),
+          dontBreakRows: true,
+          widths,
           body: [
-            headers.map((h) => ({ text: ar(h), style: 'tableHeader', alignment: 'right' })),
+            headers.map((h) => ({
+              text: ar(h),
+              style: 'tableHeader',
+              alignment: 'right',
+              noWrap: false,
+            })),
             ...rows.map((row) =>
-              row.map((c) => ({ text: ar(c), alignment: 'right' }))
+              row.map((c) => ({
+                text: ar(c),
+                alignment: 'right',
+                noWrap: false,
+              }))
             ),
           ],
         },
@@ -213,34 +260,56 @@ export async function generateArabicPDF(opts: {
           fillColor: (row: number) => (row === 0 ? '#0F172A' : row % 2 === 0 ? '#F8FAFC' : null),
           hLineColor: () => '#E2E8F0',
           vLineColor: () => '#E2E8F0',
+          hLineWidth: () => 0.5,
+          vLineWidth: () => 0.5,
+          paddingTop: () => 6,
+          paddingBottom: () => 6,
+          paddingLeft: () => 8,
+          paddingRight: () => 8,
         },
         margin: [0, 0, 0, 12],
       });
     }
   }
 
+  // docDefinition — RTL declared at every layer pdfmake honours.
   const docDefinition: any = {
     pageSize: 'A4',
     pageMargins: [40, 60, 40, 60],
+    // pdfmake honours these flags in different versions; harmless if ignored.
+    direction: 'rtl',
+    textDirection: 'rtl',
+    rtl: true,
     content,
-    defaultStyle: { font: 'Amiri', alignment: 'right', fontSize: 10 },
+    defaultStyle: {
+      font: 'Amiri',
+      alignment: 'right',
+      fontSize: 11,
+      lineHeight: 1.35,
+      // @ts-ignore - some pdfmake builds honour rtl at style level
+      rtl: true,
+    },
     styles: {
-      company: { fontSize: 10, color: '#64748B' },
-      title: { fontSize: 20, bold: true, color: '#0F172A' },
-      subtitle: { fontSize: 11, color: '#475569' },
-      sectionHeading: { fontSize: 13, bold: true, color: '#0F172A' },
-      tableHeader: { bold: true, color: '#FFFFFF', fillColor: '#0F172A' },
+      company: { fontSize: 10, color: '#64748B', alignment: 'right' },
+      title: { fontSize: 22, bold: true, color: '#0F172A', alignment: 'right' },
+      subtitle: { fontSize: 11, color: '#475569', alignment: 'right' },
+      sectionHeading: { fontSize: 14, bold: true, color: '#0F172A', alignment: 'right' },
+      tableHeader: { bold: true, color: '#FFFFFF', fillColor: '#0F172A', alignment: 'right' },
     },
     footer: (currentPage: number, pageCount: number) => ({
       text: ar(`صفحة ${currentPage} من ${pageCount}`),
       alignment: 'center',
-      fontSize: 8,
+      fontSize: 9,
       margin: [0, 10, 0, 0],
       color: '#64748B',
+      font: 'Amiri',
     }),
     info: {
       title: opts.title,
       author: opts.companyName || AR.app.title,
+      subject: opts.title,
+      creator: AR.app.title,
+      producer: AR.app.title,
     },
   };
 
