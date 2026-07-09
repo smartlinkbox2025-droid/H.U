@@ -14,7 +14,7 @@ import { BarChart3 } from 'lucide-react';
 import { generateArabicPDF } from '../utils/pdfGenerator';
 import { exportToExcel } from '../utils/excelExporter';
 import { toast } from 'sonner';
-import { startOfMonth, subMonths, endOfMonth, format, isWithinInterval } from 'date-fns';
+import { startOfMonth, subMonths, endOfMonth, endOfDay, format, isWithinInterval } from 'date-fns';
 import { ar } from 'date-fns/locale';
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
@@ -29,7 +29,7 @@ export default function FinancialReport() {
   const [to, setTo] = useState(toISODate(endOfMonth(today)));
 
   const fromD = new Date(from);
-  const toD = new Date(to);
+  const toD = endOfDay(new Date(to));
   const filteredPayments = payments.filter((p) =>
     isWithinInterval(new Date(p.paymentDate), { start: fromD, end: toD })
   );

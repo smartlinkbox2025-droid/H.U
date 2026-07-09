@@ -6,14 +6,22 @@
 import pdfMake from 'pdfmake/build/pdfmake';
 import { AR } from '../constants/arabicTerms';
 
-const FONT_URL = 'https://fonts.gstatic.com/s/tajawal/v11/Iura6YBj_oCad4k1l_6gLrZjiLlJ-G0.ttf';
-const FONT_KEY_B64 = 'sre_font_tajawal_regular_b64';
-const FONT_URL_BOLD = 'https://fonts.gstatic.com/s/tajawal/v11/Iurf6YBj_oCad4k1l7GhY9V_UvSNTA.ttf';
-const FONT_KEY_BOLD_B64 = 'sre_font_tajawal_bold_b64';
+const FONT_URL = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/tajawal/Tajawal-Regular.ttf';
+const FONT_KEY_B64 = 'sre_font_tajawal_regular_b64_v2';
+const FONT_URL_BOLD = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/tajawal/Tajawal-Bold.ttf';
+const FONT_KEY_BOLD_B64 = 'sre_font_tajawal_bold_b64_v2';
+
+// Invalidate any previously-poisoned caches (e.g. empty base64 from a failed 404 fetch).
+try {
+  localStorage.removeItem('sre_font_tajawal_regular_b64');
+  localStorage.removeItem('sre_font_tajawal_bold_b64');
+} catch { /* ignore */ }
 
 async function urlToBase64(url: string): Promise<string> {
-  const res = await fetch(url);
+  const res = await fetch(url, { cache: 'force-cache' });
+  if (!res.ok) throw new Error(`تعذّر تنزيل ملف الخط (${res.status})`);
   const buf = await res.arrayBuffer();
+  if (buf.byteLength < 10000) throw new Error(`ملف الخط تالف — الحجم ${buf.byteLength} بايت`);
   const bytes = new Uint8Array(buf);
   let binary = '';
   const CHUNK = 0x8000;
@@ -25,13 +33,22 @@ async function urlToBase64(url: string): Promise<string> {
 
 async function loadFont(url: string, key: string): Promise<string> {
   const cached = localStorage.getItem(key);
-  if (cached) return cached;
+  if (cached && cached.length > 5000) return cached;
   const b64 = await urlToBase64(url);
   try { localStorage.setItem(key, b64); } catch { /* quota — ignore */ }
   return b64;
 }
 
 let fontsReady = false;
+let cachedVfs: Record<string, string> = {};
+const cachedFonts = {
+  Tajawal: {
+    normal: 'Tajawal-Regular.ttf',
+    bold: 'Tajawal-Bold.ttf',
+    italics: 'Tajawal-Regular.ttf',
+    bolditalics: 'Tajawal-Bold.ttf',
+  },
+};
 
 export async function ensureArabicFonts(): Promise<void> {
   if (fontsReady) return;
@@ -39,19 +56,25 @@ export async function ensureArabicFonts(): Promise<void> {
     loadFont(FONT_URL, FONT_KEY_B64),
     loadFont(FONT_URL_BOLD, FONT_KEY_BOLD_B64),
   ]);
-  // Register in pdfmake VFS
-  const vfs = (pdfMake as any).vfs || {};
-  vfs['Tajawal-Regular.ttf'] = regular;
-  vfs['Tajawal-Bold.ttf'] = bold;
-  (pdfMake as any).vfs = vfs;
-  (pdfMake as any).fonts = {
-    Tajawal: {
-      normal: 'Tajawal-Regular.ttf',
-      bold: 'Tajawal-Bold.ttf',
-      italics: 'Tajawal-Regular.ttf',
-      bolditalics: 'Tajawal-Bold.ttf',
-    },
+  cachedVfs = {
+    'Tajawal-Regular.ttf': regular,
+    'Tajawal-Bold.ttf': bold,
   };
+  // pdfmake v0.3.x browser bundle: fonts must be registered via addVirtualFileSystem
+  // (which writes into an internal virtualfs module that Printer reads at createPdf-time).
+  // Direct assignment to pdfMake.vfs no longer works.
+  const pm: any = pdfMake as any;
+  if (typeof pm.addVirtualFileSystem === 'function') {
+    pm.addVirtualFileSystem(cachedVfs);
+  } else {
+    // Fallback for older bundles
+    pm.vfs = { ...(pm.vfs || {}), ...cachedVfs };
+  }
+  if (typeof pm.addFonts === 'function') {
+    pm.addFonts(cachedFonts);
+  } else {
+    pm.fonts = { ...(pm.fonts || {}), ...cachedFonts };
+  }
   fontsReady = true;
 }
 

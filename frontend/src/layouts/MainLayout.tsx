@@ -31,7 +31,7 @@ export default function MainLayout({ children }: { children: ReactNode }) {
   const [themeDark, setThemeDark] = useState<boolean>(document.documentElement.classList.contains('dark'));
 
   const notifCount = useLiveQuery(async () => {
-    return await db.notifications.where('isRead').equals(0 as any).count().catch(() => 0);
+    return await db.notifications.filter((n) => !n.isRead).count().catch(() => 0);
   }, []) ?? 0;
 
   useEffect(() => {
