@@ -1,0 +1,44 @@
+{
+  "summary": "Retest of the Arabic PDF fix (Amiri font + Arabic-Indic → Latin digit normalization). Downloaded and visually inspected all four PDF exports (Properties, Financial, Vacancy, Contract). The two critical defects flagged in iteration_3 are RESOLVED: (A) numeric strings now render in correct LTR order because ar() converts Arabic-Indic digits to ASCII before pdfmake sees them (verified: 1,200,000 / 45,000 / 90,000 / 250,000 / 1,585,000 / 60,000 / 5,000 all read correctly left-to-right, footer 'صفحة 1 من 1' shows Latin digits in the right places); (B) previously-missing letter glyphs (isolated ALEF, thousands separator, isolated RA/SEEN, LAM-ALEF ligature) now render — Amiri's cmap contains all Arabic Presentation Forms produced by arabic-persian-reshaper, so NO boxes/tofu appear in any of the four PDFs. Column headers ('الاسم', 'النوع', 'الحالة', 'المدينة', 'السعر') are all visible and shaped. Contract PDF (Test 4) was exercised end-to-end (created a new contract via the dialog, then printed) and also renders correctly. Original user complaint ('خطأ في بعض الاحرف و الارقام') is considered fixed.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "All PDF exports",
+        "issues": [
+          "Minor visual: Amiri glyphs drawn LTR after arabic-persian-reshaper produce a slightly loose intra-word letter spacing (letters do not fully touch/kern as they would with true OT shaping via HarfBuzz). Not a functional bug — text is readable and shaped. Improvement path (optional): switch to a shaping-aware PDF library (pdfkit + fontkit) or accept the current output as production-adequate.",
+          "Minor visual: space between adjacent Arabic words (e.g. 'برج' + 'الياسمين') is small and can look like a single word at small font sizes. Root cause: bidiForPdf() treats whitespace as neutral and joins it with the surrounding Arabic segment during the reverse-and-glue step, which collapses the gap when pdfmake draws the reversed segment. Could be improved by inserting an extra thin space around word boundaries, but not blocking."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/tmp/pdf_test4/properties.pdf",
+    "/tmp/pdf_test4/financial.pdf",
+    "/tmp/pdf_test4/vacancy.pdf",
+    "/tmp/pdf_test4/contract.pdf",
+    "/tmp/pdf_test4/properties_page-1.png",
+    "/tmp/pdf_test4/financial_page-1.png",
+    "/tmp/pdf_test4/vacancy_page-1.png",
+    "/tmp/pdf_test4/contract_page-1.png"
+  ],
+  "action_items": [
+    "No blocking actions. Original user complaint is fixed. Optional polish: reduce intra-word letter spacing / adjust word spacing in bidiForPdf() output for tighter Arabic appearance."
+  ],
+  "critical_code_review_comments": [
+    "pdfGenerator.ts::toLatinDigits() — the fix is correct and minimal; it converts Arabic-Indic (٠-٩ / ۰-۹) and Arabic separators (٬ ٫) to ASCII BEFORE reshaping, so pdfmake's implicit bidi never triggers on numeric runs. Approach is robust because Latin digits are strong-LTR and pdfmake does not touch them.",
+    "pdfGenerator.ts — Amiri font choice is appropriate: cmap covers the U+FE70–U+FEFC presentation-form range emitted by arabic-persian-reshaper, and Amiri is well-known for complete Arabic coverage. Previous Tajawal cache keys (v1/v2) are correctly invalidated in the module top-level try/catch.",
+    "Consider extending toLatinDigits() to also normalize the Arabic percent sign U+066A (٪) if it ever appears in report data — currently unused but a foot-gun for future features.",
+    "LTR_RUN_RE now includes ٠-٩ and ۰-۹ which is redundant after toLatinDigits() runs (the input to the regex is post-normalization), but harmless. Optional cleanup."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "N/A (frontend-only)", "frontend": "100% — all four PDF exports render correct Arabic text and correctly-ordered Latin digits; the original bug is fixed" },
+  "test_credentials": "N/A — client-side PWA, no auth",
+  "seed_data_creation": "Used auto-seed (4 properties, 2 customers). Created 1 test contract (شقة النخيل / خديجة عبدالله السبيعي, amount 60,000, monthly, 12 auto-generated invoices) so Test 4 could be exercised.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Fix is complete and verified. Rendered PDFs are in /tmp/pdf_test4/*.pdf and their first-page PNGs alongside. To reproduce: clear localStorage font keys, navigate to /properties (or /reports/financial, /reports/vacancy, /contracts) and click the corresponding data-testid button. All numbers should appear as ASCII digits in normal LTR order; all Arabic letters should be shaped (connected cursive) with no tofu/box glyphs.",
+  "rca of the issue": "The two root causes identified in iteration_3 were fixed exactly as recommended: (1) Arabic-Indic digit reversal was caused by pdfmake applying its own bidi reordering on top of the manual reversal done by bidiForPdf(); the fix converts all Arabic-Indic digits and separators to ASCII in toLatinDigits() BEFORE reshaping so pdfmake sees only strong-LTR characters in numeric runs — verified by pdftotext output showing every price/date in correct LTR order. (2) Missing letter glyphs were caused by Tajawal's subset cmap not covering all Arabic Presentation Forms; the fix switches to Amiri (Regular + Bold) whose cmap includes the full U+FE70–U+FEFC range — verified by absence of boxes/tofu in all four rendered PDFs. Font cache keys were bumped to *_v3 to force a re-download and old Tajawal keys are cleared at module load."
+}

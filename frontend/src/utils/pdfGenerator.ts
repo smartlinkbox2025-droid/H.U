@@ -8,15 +8,17 @@ import pdfMake from 'pdfmake/build/pdfmake';
 import { ArabicShaper } from 'arabic-persian-reshaper';
 import { AR } from '../constants/arabicTerms';
 
-const FONT_URL = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/tajawal/Tajawal-Regular.ttf';
-const FONT_KEY_B64 = 'sre_font_tajawal_regular_b64_v2';
-const FONT_URL_BOLD = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/tajawal/Tajawal-Bold.ttf';
-const FONT_KEY_BOLD_B64 = 'sre_font_tajawal_bold_b64_v2';
+const FONT_URL = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/amiri/Amiri-Regular.ttf';
+const FONT_KEY_B64 = 'sre_font_amiri_regular_b64_v3';
+const FONT_URL_BOLD = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/amiri/Amiri-Bold.ttf';
+const FONT_KEY_BOLD_B64 = 'sre_font_amiri_bold_b64_v3';
 
-// Invalidate any previously-poisoned caches (e.g. empty base64 from a failed 404 fetch).
+// Invalidate any previously-poisoned caches from earlier attempts.
 try {
   localStorage.removeItem('sre_font_tajawal_regular_b64');
   localStorage.removeItem('sre_font_tajawal_bold_b64');
+  localStorage.removeItem('sre_font_tajawal_regular_b64_v2');
+  localStorage.removeItem('sre_font_tajawal_bold_b64_v2');
 } catch { /* ignore */ }
 
 async function urlToBase64(url: string): Promise<string> {
@@ -44,11 +46,11 @@ async function loadFont(url: string, key: string): Promise<string> {
 let fontsReady = false;
 let cachedVfs: Record<string, string> = {};
 const cachedFonts = {
-  Tajawal: {
-    normal: 'Tajawal-Regular.ttf',
-    bold: 'Tajawal-Bold.ttf',
-    italics: 'Tajawal-Regular.ttf',
-    bolditalics: 'Tajawal-Bold.ttf',
+  Amiri: {
+    normal: 'Amiri-Regular.ttf',
+    bold: 'Amiri-Bold.ttf',
+    italics: 'Amiri-Regular.ttf',
+    bolditalics: 'Amiri-Bold.ttf',
   },
 };
 
@@ -59,17 +61,15 @@ export async function ensureArabicFonts(): Promise<void> {
     loadFont(FONT_URL_BOLD, FONT_KEY_BOLD_B64),
   ]);
   cachedVfs = {
-    'Tajawal-Regular.ttf': regular,
-    'Tajawal-Bold.ttf': bold,
+    'Amiri-Regular.ttf': regular,
+    'Amiri-Bold.ttf': bold,
   };
   // pdfmake v0.3.x browser bundle: fonts must be registered via addVirtualFileSystem
   // (which writes into an internal virtualfs module that Printer reads at createPdf-time).
-  // Direct assignment to pdfMake.vfs no longer works.
   const pm: any = pdfMake as any;
   if (typeof pm.addVirtualFileSystem === 'function') {
     pm.addVirtualFileSystem(cachedVfs);
   } else {
-    // Fallback for older bundles
     pm.vfs = { ...(pm.vfs || {}), ...cachedVfs };
   }
   if (typeof pm.addFonts === 'function') {
@@ -109,9 +109,32 @@ export interface PdfSection {
 const LTR_RUN_RE =
   /([\d\u0660-\u0669\u06F0-\u06F9][\d\u0660-\u0669\u06F0-\u06F9.,\u066B\u066C/\-:]*|[A-Za-z][A-Za-z0-9._\-]*)/g;
 
+// Map Arabic-Indic digits (٠-٩) and Extended Arabic-Indic digits (۰-۹)
+// plus Arabic decimal/thousands separators (٫ ٬) to their ASCII equivalents.
+// pdfmake applies implicit bidi reordering to Arabic-Indic digit runs, which
+// visually reverses numeric strings inside PDF output. ASCII digits are safe.
+const ARABIC_INDIC_DIGITS = /[\u0660-\u0669\u06F0-\u06F9\u066B\u066C]/g;
+const AR_TO_LATIN: Record<string, string> = {
+  '\u0660': '0', '\u0661': '1', '\u0662': '2', '\u0663': '3', '\u0664': '4',
+  '\u0665': '5', '\u0666': '6', '\u0667': '7', '\u0668': '8', '\u0669': '9',
+  '\u06F0': '0', '\u06F1': '1', '\u06F2': '2', '\u06F3': '3', '\u06F4': '4',
+  '\u06F5': '5', '\u06F6': '6', '\u06F7': '7', '\u06F8': '8', '\u06F9': '9',
+  '\u066B': '.', '\u066C': ',',
+};
+
+function toLatinDigits(s: string): string {
+  return s.replace(ARABIC_INDIC_DIGITS, (c) => AR_TO_LATIN[c] || c);
+}
+
 function bidiForPdf(text: string): string {
   if (!text) return text;
-  const shaped: string = ArabicShaper.convertArabic(String(text));
+  // 1) Normalize any Arabic-Indic digits & separators to ASCII so pdfmake does
+  //    NOT apply its implicit bidi reversal to numeric runs.
+  const normalized = toLatinDigits(String(text));
+  // 2) Reshape Arabic letters into contextual presentation forms.
+  const shaped: string = ArabicShaper.convertArabic(normalized);
+  // 3) Bidi-aware reversal: reverse the string so it reads correctly when
+  //    pdfmake draws LTR, but keep LTR runs (digits, Latin) intact.
   const parts: { ltr: boolean; text: string }[] = [];
   let lastIndex = 0;
   let m: RegExpExecArray | null;
@@ -200,7 +223,7 @@ export async function generateArabicPDF(opts: {
     pageSize: 'A4',
     pageMargins: [40, 60, 40, 60],
     content,
-    defaultStyle: { font: 'Tajawal', alignment: 'right', fontSize: 10 },
+    defaultStyle: { font: 'Amiri', alignment: 'right', fontSize: 10 },
     styles: {
       company: { fontSize: 10, color: '#64748B' },
       title: { fontSize: 20, bold: true, color: '#0F172A' },
