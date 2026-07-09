@@ -33,12 +33,13 @@ try {
     'sre_font_tajawal_regular_b64', 'sre_font_tajawal_bold_b64',
     'sre_font_tajawal_regular_b64_v2', 'sre_font_tajawal_bold_b64_v2',
     'sre_font_amiri_regular_b64_v3', 'sre_font_amiri_bold_b64_v3',
+    'sre_font_amiri_reg_v4', 'sre_font_amiri_bold_v4',
   ];
   for (const k of legacyKeys) localStorage.removeItem(k);
 } catch { /* ignore */ }
 
-const FONT_CACHE_KEY_REG = 'sre_font_amiri_reg_v4';
-const FONT_CACHE_KEY_BOLD = 'sre_font_amiri_bold_v4';
+const FONT_CACHE_KEY_REG = 'sre_font_amiri_reg_v5_subset';
+const FONT_CACHE_KEY_BOLD = 'sre_font_amiri_bold_v5_subset';
 
 async function urlToBase64(url: string): Promise<string> {
   const res = await fetch(url);
@@ -57,7 +58,8 @@ async function urlToBase64(url: string): Promise<string> {
 async function loadFontBase64(url: string, key: string): Promise<string> {
   try {
     const cached = localStorage.getItem(key);
-    if (cached && cached.length > 10000) return cached;
+    // Subsetted TTFs are ~112 KB → ~150 KB base64. Guard against tiny/corrupt cache.
+    if (cached && cached.length > 50000) return cached;
   } catch { /* ignore */ }
   const b64 = await urlToBase64(url);
   try { localStorage.setItem(key, b64); } catch { /* quota — ignore */ }
@@ -162,24 +164,12 @@ export interface PdfSection {
   };
 }
 
-// Estimate a comfortable column width from the longest cell length so Arabic
-// content is not clipped and columns feel balanced.  Applied when caller does
-// not supply explicit widths.
-function autoWidths(headers: string[], rows: (string | number)[][]): (string | number)[] {
-  const cols = headers.length;
-  const lens: number[] = new Array(cols).fill(0);
-  for (let c = 0; c < cols; c++) {
-    lens[c] = Math.max(lens[c], String(headers[c] ?? '').length);
-  }
-  for (const row of rows) {
-    for (let c = 0; c < cols; c++) {
-      lens[c] = Math.max(lens[c], String(row[c] ?? '').length);
-    }
-  }
-  const total = lens.reduce((a, b) => a + b, 0) || 1;
-  // Use star widths proportional to content length so pdfmake auto-distributes
-  // the available page width without truncation.
-  return lens.map((l) => `${Math.max(1, Math.round((l / total) * 100))}*`);
+// Return an array of pdfmake-compatible width values.  We use '*' for every
+// column so pdfmake distributes the available width equally and wraps content
+// inside cells (no clipping). Explicit widths supplied by the caller are
+// preserved verbatim.
+function autoWidths(headers: string[]): (string | number)[] {
+  return headers.map(() => '*');
 }
 
 export async function generateArabicPDF(opts: {
@@ -233,7 +223,7 @@ export async function generateArabicPDF(opts: {
       const rows = s.table.rows.map((r) => [...r].reverse());
       const widths = s.table.widths
         ? [...s.table.widths].reverse()
-        : autoWidths(headers, rows);
+        : autoWidths(headers);
 
       content.push({
         table: {
@@ -272,22 +262,17 @@ export async function generateArabicPDF(opts: {
     }
   }
 
-  // docDefinition — RTL declared at every layer pdfmake honours.
+  // docDefinition — RTL declared at the doc level (pdfmake 0.3.x honours `direction: 'rtl'`).
   const docDefinition: any = {
     pageSize: 'A4',
     pageMargins: [40, 60, 40, 60],
-    // pdfmake honours these flags in different versions; harmless if ignored.
     direction: 'rtl',
-    textDirection: 'rtl',
-    rtl: true,
     content,
     defaultStyle: {
       font: 'Amiri',
       alignment: 'right',
       fontSize: 11,
       lineHeight: 1.35,
-      // @ts-ignore - some pdfmake builds honour rtl at style level
-      rtl: true,
     },
     styles: {
       company: { fontSize: 10, color: '#64748B', alignment: 'right' },
@@ -314,5 +299,19 @@ export async function generateArabicPDF(opts: {
   };
 
   const filename = opts.filename || `${opts.title}.pdf`.replace(/\s+/g, '_');
-  pdfMake.createPdf(docDefinition).download(filename);
+  // Wrap in try/catch so pdfmake exceptions surface to the caller (which shows
+  // a toast). Otherwise a fatal render error swallows silently.
+  try {
+    const doc = pdfMake.createPdf(docDefinition);
+    await new Promise<void>((resolve, reject) => {
+      try {
+        doc.download(filename, () => resolve(), { autoPrint: false } as any);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  } catch (err: any) {
+    console.error('[PDF] generation failed', err);
+    throw new Error('تعذّر إنشاء ملف PDF: ' + (err?.message || 'خطأ داخلي'));
+  }
 }

@@ -1,0 +1,62 @@
+{
+  "summary": "PDF REGRESSION FIXED — iteration_5's 'unsupported number: NaN' error is fully resolved. All 4 PDF flows (Properties, Financial, Vacancy, Contract) now generate downloadable PDFs with excellent visual quality. Verified end-to-end: (a) clicking each export button triggers a real browser download, (b) file sizes are healthy (~15–23 KB), (c) rendering each PDF to PNG via pdftoppm shows fully shaped/cursive Arabic (no tofu), Latin digits in LTR order (1,200,000 ر.س / INV-2026-0001 / 09 يوليو 2026), rightmost column = first logical column (الاسم/البند/رقم الفاتورة), no clipping (long cell 'محل تجاري الوادي' wraps to 2 lines inside cell), and footer 'صفحة N من M' renders shaped Arabic + Latin digits. The Amiri subsetting (112KB) + reverted autoWidths() to '*' fix works. Excel export, theme toggle and dashboard all still work (regression-clean).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Contract PDF page 1 — section heading '(12) الفواتير المولّدة'",
+        "issues": [
+          "Parentheses around a Latin-digit run are bidi-reversed, so '(12) الفواتير...' visually renders as 'الفواتير... )12(' — the closing paren appears left of '12' and opening paren right of it. Root cause: LTR_RUN_RE in pdfGenerator.ts only captures [A-Za-z0-9._\\-] inside a Latin run; ASCII parentheses fall outside and are treated as Arabic, so they get reversed while '12' does not. Fix: include '(' and ')' (and '[' ']' '{' '}') in the LTR-run character class, OR mirror them when they abut an LTR run. Cosmetic-only — the invoice count on page 1 is still readable, but the mirrored parens look wrong to an Arabic reader."
+        ]
+      },
+      {
+        "screen": "Contract PDF page 1 — Arabic text",
+        "issues": [
+          "String literal 'الفواتير المؤلدة' (contract PDF generator) is a typo — should be 'الفواتير المولّدة' (generated invoices). PDF renders it verbatim so users see the misspelling. Business-text fix — not a rendering bug."
+        ]
+      },
+      {
+        "screen": "All PDFs with wrapped Arabic cells (e.g. Properties row 'محل تجاري الوادي')",
+        "issues": [
+          "When an Arabic cell wraps to a second line, the visual line order does not match Arabic semantic order because the string is pre-reversed for pdfmake's LTR renderer. Example: 'محل تجاري الوادي' wraps as line1='تجاري الوادي' / line2='محل'. Each individual line reads correctly right-to-left, but a reader following top-to-bottom will read them in reversed logical order. Known limitation of the pdfmake+prereverse approach. Mitigation: widen the offending column (increase widths for name column) so it does not wrap, or move to bidi-aware pdf lib. Low priority — content is not lost, only ordering of wrapped lines."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/tmp/pdf_test6/properties.pdf",
+    "/tmp/pdf_test6/financial.pdf",
+    "/tmp/pdf_test6/vacancy.pdf",
+    "/tmp/pdf_test6/contract.pdf",
+    "/tmp/pdf_test6/properties-1.png",
+    "/tmp/pdf_test6/financial-1.png",
+    "/tmp/pdf_test6/vacancy-1.png",
+    "/tmp/pdf_test6/contract-1.png",
+    "/tmp/pdf_test6/contract-2.png"
+  ],
+  "action_items": [
+    "OPTIONAL (cosmetic): extend LTR_RUN_RE in /app/frontend/src/utils/pdfGenerator.ts to include parentheses so '(12)' renders correctly instead of ')12('. Suggested regex change: add '(' ')' to both character classes in the pattern (e.g. treat any consecutive run of Latin/digit/paren as one LTR chunk).",
+    "OPTIONAL: fix typo 'المؤلدة' → 'المولّدة' wherever the Contract PDF composes that heading (likely in Contracts.tsx printContract or pdfGenerator caller).",
+    "OPTIONAL: for tables where a single cell is much longer than others (e.g. the property-name column in the Properties/Vacancy PDF), pass explicit widths to prevent 2-line wraps whose visual order feels reversed to Arabic readers."
+  ],
+  "critical_code_review_comments": [
+    "pdfGenerator.ts:200 — canvas horizontal line still hard-codes x2:515 assuming pageSize 'A4' with 40/40 side margins. If pageMargins or pageSize change the divider will be the wrong width silently. Consider computing width as pageWidth - pageMargins[0] - pageMargins[2] from a helper.",
+    "pdfGenerator.ts:117-118 — LTR_RUN_RE only accepts [A-Za-z0-9._\\-:/] plus Arabic-Indic digits. It misses parentheses, brackets, braces, '%', '#', '&', '@', '=' and other ASCII punctuation that in real invoices often appears mixed with digits (e.g. '(12)', '#REF-123', 'A/B'). Any such run gets partially reversed, producing subtle visual bugs. Broaden the LTR run character class.",
+    "pdfGenerator.ts:44-55 — urlToBase64 still uses String.fromCharCode.apply on 8000-byte chunks. Fine for 112 KB fonts but would OOM if font size grows; consider FileReader.readAsDataURL for robustness.",
+    "pdfGenerator.ts:38 — localStorage.removeItem loop for legacy keys runs on every module import. Consider guarding by a version flag to avoid running on every page load (cheap, but adds noise on cold start).",
+    "iteration_5→iteration_6 shows the value of the subset step. Consider committing a build-time preflight (headless-chrome smoke test that generates one PDF from each of the 4 flows) so future font/pdfmake upgrades cannot silently break PDF export."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "N/A (frontend-only test as requested)",
+    "frontend": "100% — 4/4 PDFs generate, download, and render correctly. Excel/theme/dashboard regression-clean."
+  },
+  "test_credentials": "N/A — client-side PWA, no auth (test_credentials.md not required).",
+  "seed_data_creation": "Auto-seeded 4 properties + 2 customers. Created 1 test contract during Test 4 (property=محل تجاري الوادي, customer=خديجة عبدالله السبيعي, amount=60,000, monthly, 1-year → 12 invoices generated). Contract ID = 92d9405f-3515-47ad-8b32-2dcf91eb596e.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "PDF pipeline is now stable. Downloaded artefacts are at /tmp/pdf_test6/*.pdf and rendered PNGs at /tmp/pdf_test6/*.png. Sizes: properties=15446, financial=14889, vacancy=18902, contract=22675. To sanity-check any future PDF change, generate one from each flow and diff with these files; regressions would appear as (a) missing download, (b) file <5 KB (font failed to embed), or (c) tofu glyphs in the PNG. The three remaining issues (parenthesis bidi, typo, wrapped-line order) are cosmetic and documented under design_issues.",
+  "rca of the issue": "iteration_5 regression root cause was pdfmake receiving invalid width tokens like '30*' from a buggy autoWidths() helper (which caused fontkit/pdfkit's metric arithmetic to emit NaN, thrown from PDFDocument.rect). Two defensive fixes applied by main agent between iterations 5 and 6: (1) reverted autoWidths() to return plain '*' for every column, letting pdfmake distribute width evenly and wrap content — verified in pdfGenerator.ts:171-173; (2) subsetted Amiri Regular+Bold via pyftsubset dropping GSUB/GPOS/GDEF/BASE/JSTF/MATH tables — verified via ls -la (both files now 112140/112200 bytes, down from 431/413 KB). The subset is a belt-and-suspenders defense against fontkit choking on OpenType layout tables it doesn't use. Verified fix by clicking each of the 4 PDF buttons in a fresh browser session with localStorage font caches cleared (per main agent's instruction) — all 4 downloads succeeded, all 4 PDFs render beautifully."
+}
