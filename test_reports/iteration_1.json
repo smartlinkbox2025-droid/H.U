@@ -1,0 +1,45 @@
+{
+  "summary": "Comprehensive Playwright test of the Arabic RTL PWA 'المتخصص الذكي للعقارات'. Verified dashboard, all sidebar navigation, full CRUD on properties/customers/contracts, contract-driven invoice generation (12 monthly invoices from 60000 SAR contract), auto-linking of property status to 'rented', payment recording, invoice status transition to 'مسددة', payment history, financial report totals updating live (5,000 SAR after payment), vacancy tracker with tenant enrichment, settings save with toast, theme toggle, JSON backup export, and IndexedDB persistence across page reloads. One CRITICAL bug found: PDF generation broken due to 404 on Google Fonts Tajawal URLs.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "utils/pdfGenerator.ts",
+        "issue": "PDF generation fails for ALL reports (Properties, Contracts, Financial, Vacancy). Root cause: Google Fonts URLs return 404 (https://fonts.gstatic.com/s/tajawal/v11/Iura6YBj_oCad4k1l_6gLrZjiLlJ-G0.ttf and .../Iurf6YBj_oCad4k1l7GhY9V_UvSNTA.ttf). Fetch succeeds with empty body, so localStorage caches empty base64. pdfmake then throws PAGEERROR: 'File Tajawal-Regular.ttf not found in virtual file system'. User sees toast 'تعذّر إنشاء PDF'.",
+        "selector": "[data-testid='report-pdf-button'], [data-testid='vacancy-pdf-button'], [data-testid='export-pdf-button'], [data-testid='print-contract-*']",
+        "priority": "HIGH"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Dashboard on first load",
+        "issues": ["Recharts logs multiple 'width(-1) height(-1)' warnings during initial mount before container dimensions resolve. Non-blocking but pollutes console. Consider adding minWidth/minHeight to ResponsiveContainer parents or aspect ratio."]
+      }
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "CRITICAL: Fix PDF export. Options: (a) bundle Tajawal-Regular.ttf & Tajawal-Bold.ttf as base64 modules imported at build time (recommended for offline PWA); (b) update font URLs to a working CDN and add integrity validation of fetched size (reject empty/short responses so localStorage doesn't cache garbage); (c) validate res.ok and buffer size in urlToBase64 and throw on failure so the fallback path is clear.",
+    "Minor: silence Recharts negative-dimension warning by setting minWidth/minHeight on the container div wrapping ResponsiveContainer.",
+    "Nice-to-have: also purge the poisoned localStorage keys sre_font_tajawal_regular_b64/bold_b64 on version bump so existing users aren't stuck with an empty cached font after fix ships."
+  ],
+  "critical_code_review_comments": [
+    "utils/pdfGenerator.ts caches font base64 in localStorage without validating the fetch succeeded — a 404 on Google Fonts writes an empty/broken string that survives forever. Add `if (!res.ok) throw`, and reject if bytes.length < 10000.",
+    "pdfmake VFS relies on remote Google Fonts on first PDF export. For an offline-first PWA this is fragile: on planes/subways first PDF will silently fail. Prefer bundling the TTF as a Vite asset via `import fontBase64 from '../assets/Tajawal-Regular.ttf?url'` and using fetch on the local URL, or emit as base64 module.",
+    "Theme toggle occasionally does not fire when a Sonner toast is stacked at top-left in RTL (same visual corner as toggle button). Considered moving Toaster to bottom-left or top-right in RTL to prevent overlay with header buttons.",
+    "MainLayout.tsx line 34 uses `.equals(0 as any)` on Dexie index — works but a boolean index typed as number is a code-smell.",
+    "FinancialReport.tsx: `isWithinInterval` uses `end: toD` where toD = new Date('YYYY-MM-DD') sets the boundary to 00:00 UTC of the end day; late-day payments on the end date may be excluded. Consider `endOfDay(toD)` for inclusivity."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (no backend)", "frontend": "94% (17/18 primary flows pass; PDF export blocking)"},
+  "test_credentials": "N/A – purely client-side, no auth",
+  "seed_data_creation": "Auto-seeded on first launch: 4 properties + 2 customers by ensureDefaults/seedDemoData in MainLayout.tsx. During tests, added 1 customer (خالد الشمري), 1 contract (60,000 SAR rent, monthly) → 12 invoices auto-generated, 1 payment (5,000 SAR cash).",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All flows except PDF export are working end-to-end. IndexedDB persistence verified across reload. Excel exports (properties, customers, invoices, financial, vacancy) all download correctly. JSON backup export works. For PDF retest after fix: navigate to /reports/financial, click report-pdf-button, expect a .pdf download within 30s and no PAGEERROR containing 'Tajawal'. Also retest properties export-pdf-button and vacancy-pdf-button. To clean state between tests use: `await page.evaluate(() => new Promise(r => { const req = indexedDB.deleteDatabase('SmartRealEstateDB'); req.onsuccess = req.onerror = req.onblocked = () => r(); }))` + `localStorage.clear()` (to also purge broken cached font).",
+  "rca of the issue": "PDF export failure RCA: (1) Reproduction: navigate to /reports/financial and click [data-testid=report-pdf-button]. Observe PAGEERROR 'File Tajawal-Regular.ttf not found in virtual file system' and toast 'تعذّر إنشاء PDF'. (2) Root cause: utils/pdfGenerator.ts fetches Tajawal font from Google Fonts URLs `https://fonts.gstatic.com/s/tajawal/v11/Iura6YBj_oCad4k1l_6gLrZjiLlJ-G0.ttf` (regular) and `.../Iurf6YBj_oCad4k1l7GhY9V_UvSNTA.ttf` (bold). Both URLs currently return HTTP 404 (verified via curl). `urlToBase64` does not check `res.ok`, so it writes an empty base64 string into localStorage under `sre_font_tajawal_regular_b64`. Subsequent calls to `ensureArabicFonts` read the cached empty string, register it in pdfmake VFS, and pdfmake still throws because either the file has 0 bytes or the fetch produced garbage. (3) Mitigation: (a) validate `res.ok` and byte length in urlToBase64; throw on failure so the empty value is not cached; (b) preferred – bundle Tajawal TTFs as static assets (Vite `?url` or base64 module) since this is a fully offline PWA anyway; (c) also invalidate the two localStorage keys on the next release so existing users get the fresh font."
+}
